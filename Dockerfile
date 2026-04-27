@@ -58,10 +58,10 @@ ARG AIRFLOW_VERSION=2.10.3
 ARG PYTHON_VERSION=3.12
 
 # Copy and install the pipelines package with all Airflow dockerfile dependencies
-COPY --chown=airflow:root pyproject.toml /opt/airflow/
-COPY --chown=airflow:root src/ /opt/airflow/src/
+COPY --from=ghcr.io/dulain-willis/steam-pipelines:latest --chown=airflow:root /opt/pipeline/pyproject.toml /opt/airflow/
+COPY --from=ghcr.io/dulain-willis/steam-pipelines:latest --chown=airflow:root /opt/pipeline/src/ /opt/airflow/src/
 RUN pip install --no-cache-dir -e /opt/airflow/[airflow_dockerfile] \
     --constraint https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt
 
 # Copy spark jobs
-COPY --chown=airflow:root spark/ /opt/spark/jobs/
+COPY --from=ghcr.io/dulain-willis/steam-pipelines:latest --chown=airflow:root /opt/spark/jobs/ /opt/spark/jobs/
