@@ -55,7 +55,7 @@ RUN curl -fL --progress-bar \
 
 USER airflow
 ARG AIRFLOW_VERSION=2.10.3
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.10
 
 # Copy and install the pipelines package with all Airflow dockerfile dependencies
 COPY --from=ghcr.io/dulain-willis/steam-pipelines:latest --chown=airflow:root /opt/pipeline/pyproject.toml /opt/airflow/
