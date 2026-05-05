@@ -1,3 +1,5 @@
+ARG PIPELINES_SHA=latest
+
 FROM apache/airflow:2.10.3
 
 USER root
@@ -58,10 +60,10 @@ ARG AIRFLOW_VERSION=2.10.3
 ARG PYTHON_VERSION=3.10
 
 # Copy and install the pipelines package with all Airflow dockerfile dependencies
-COPY --from=ghcr.io/dulain-willis/steam-pipelines:latest --chown=airflow:root /opt/pipeline/pyproject.toml /opt/airflow/
-COPY --from=ghcr.io/dulain-willis/steam-pipelines:latest --chown=airflow:root /opt/pipeline/src/ /opt/airflow/src/
+COPY --from=ghcr.io/dulain-willis/steam-pipelines@${PIPELINES_SHA} --chown=airflow:root /opt/pipeline/pyproject.toml /opt/airflow/
+COPY --from=ghcr.io/dulain-willis/steam-pipelines@${PIPELINES_SHA} --chown=airflow:root /opt/pipeline/src/ /opt/airflow/src/
 RUN pip install --no-cache-dir -e /opt/airflow/[airflow_dockerfile] \
     --constraint https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt
 
 # Copy spark jobs
-COPY --from=ghcr.io/dulain-willis/steam-pipelines:latest --chown=airflow:root /opt/spark/jobs/ /opt/spark/jobs/
+COPY --from=ghcr.io/dulain-willis/steam-pipelines@${PIPELINES_SHA} --chown=airflow:root /opt/spark/jobs/ /opt/spark/jobs/

@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  repository_dispatch:
+    types: [pipelines-updated]
 
 env:
   REGISTRY: ghcr.io
@@ -37,9 +39,21 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PIPELINES_SHA=${{ github.event.client_payload.pipelines_sha || 'latest' }}
+
+      - name: Trigger deployment
+        if: success()
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GH_DISPATCH_TOKEN }}
+          repository: Dulain-Willis/steam-data-platform
+          event-type: deploy
+          client-payload: '{"orchestration_sha": "${{ steps.build.outputs.digest }}", "pipelines_sha": "${{ github.event.client_payload.pipelines_sha }}"}'
