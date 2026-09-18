@@ -40,7 +40,7 @@ FROM apache/airflow:${AIRFLOW_VERSION}-python3.12
 COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 
-COPY dags/ /opt/airflow/dags/
-COPY --from=dbt-repo-fetcher /bundle /opt/airflow/dbt/steam_analytics
+COPY --chown=airflow:root dags/ /opt/airflow/dags/
+COPY --chown=airflow:root --from=dbt-repo-fetcher /bundle /opt/airflow/dbt/steam_analytics
 
 RUN cd /opt/airflow/dbt/steam_analytics && dbt deps
