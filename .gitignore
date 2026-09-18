@@ -1,0 +1,18 @@
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# airflow (test runs)
+tests/.airflow_home_test/
+
+# dbt (generated when tests run dbt against the fixture project)
+tests/fixtures/**/target/
+tests/fixtures/**/dbt_packages/
+tests/fixtures/**/logs/
+tests/fixtures/**/.user.yml
+
+# env
+.env

@@ -1,0 +1,35 @@
+name: build-and-push
+
+on:
+  repository_dispatch:
+    types: [dbt-project-updated]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout steam-orchestration onto the runner
+        uses: actions/checkout@v4
+
+      - name: Log in to Github Container Registry (GHRC)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ghcr.io/dulain-willis/steam-orchestration:latest
+            ghcr.io/dulain-willis/steam-orchestration:${{ github.event.client_payload.sha }}
+          build-args: |
+            STEAM_ANALYTICS_REF=${{ github.event.client_payload.sha }}

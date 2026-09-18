@@ -1,0 +1,13 @@
+steam_analytics:
+  target: test
+  outputs:
+    test:
+      type: snowflake
+      account: dummy
+      user: dummy
+      role: dummy
+      warehouse: dummy
+      database: dummy
+      schema: dummy
+      private_key_path: "{{ env_var('DBT_FIXTURE_PRIVATE_KEY_PATH', '/dev/null') }}"
+      threads: 1

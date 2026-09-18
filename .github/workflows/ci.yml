@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+
+    steps:
+      - name: Checkout steam-orchestration onto the runner
+        uses: actions/checkout@v4
+
+      - name: Set up python environment
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install python packages
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python -r requirements-dev.txt
+
+      - name: Run ruff
+        run: .venv/bin/ruff check dags/ tests/
+
+      - name: Run pytest
+        run: .venv/bin/python -m pytest tests/ -v

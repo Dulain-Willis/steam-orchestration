@@ -1,0 +1,8 @@
+name: "fixture_project"
+version: "1.0.0"
+config-version: 2
+profile: "steam_analytics"
+model-paths: ["models"]
+clean-targets:
+  - "target"
+  - "dbt_packages"

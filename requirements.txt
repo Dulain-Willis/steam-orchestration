@@ -1,0 +1,5 @@
+apache-airflow~=3.2.2
+apache-airflow-providers-smtp~=3.0.4
+astronomer-cosmos~=1.15.1
+dbt-core~=1.12.0
+dbt-snowflake~=1.12.0
