@@ -33,3 +33,25 @@ jobs:
             ghcr.io/dulain-willis/steam-orchestration:${{ github.event.client_payload.sha }}
           build-args: |
             STEAM_ANALYTICS_REF=${{ github.event.client_payload.sha }}
+
+      - name: Checkout steam-infra onto the runner
+        uses: actions/checkout@v4
+        with:
+          repository: Dulain-Willis/steam-infra
+          token: ${{ secrets.STEAM_INFRA_PUSH_TOKEN }}
+          path: steam-infra
+
+      - name: Bump defaultAirflowTag in steam-infra
+        uses: mikefarah/yq@v4
+        with:
+          cmd: yq -i '.defaultAirflowTag = "${{ github.event.client_payload.sha }}"' steam-infra/k8s/airflow/values-image.yaml
+
+      - name: Commit and push the tag bump
+        working-directory: steam-infra
+        run: |
+          git config user.name "steam-orchestration-bot"
+          git config user.email "actions@github.com"
+          git diff --quiet && exit 0
+          git add k8s/airflow/values-image.yaml
+          git commit -m "Bump airflow image to ${{ github.event.client_payload.sha }}"
+          git push origin main
