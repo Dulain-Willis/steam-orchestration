@@ -1,12 +1,53 @@
 name: build-and-push
 
+# One image is built from two inputs — this repo's DAG code and a
+# steam-analytics ref baked in by the Dockerfile — so there are three ways to
+# ask for a build, and all three produce the same kind of artefact:
+#
+#   repository_dispatch  steam-analytics merged to main and told us its sha
+#   push                 this repo merged to main; steam-analytics' main is
+#                        resolved at build time
+#   workflow_dispatch    a one-off rebuild against an arbitrary ref
+#
+# The push trigger is the one that was missing: a merge here used to build
+# nothing, so DAG changes reached no environment until the next
+# steam-analytics merge happened to rebuild them.
 on:
   repository_dispatch:
     types: [dbt-project-updated]
+  push:
+    branches: [main]
+    # A docs-only merge would otherwise rebuild the image, bump staging's tag
+    # and have ArgoCD restart staging's Airflow for a typo.
+    paths-ignore:
+      - '**.md'
+      - LICENSE
+  workflow_dispatch:
+    inputs:
+      steam_analytics_ref:
+        description: "steam-analytics branch, tag or sha to bake in (default: its main)"
+        required: false
+        type: string
 
 permissions:
   contents: read
   packages: write
+
+# Serialised, not cancelled. The last step pushes a commit to steam-infra's
+# main; two runs that overlap both check it out at the same commit, both bump
+# values-image-staging.yaml and both push, and the loser gets a
+# non-fast-forward rejection *after* its image is already in GHCR — so that
+# build silently never reaches staging and the live tag belongs to the other
+# run. Three triggers make overlapping runs routine (a merge here and a
+# steam-analytics dispatch minutes apart, or any merge during a manual
+# rebuild), so they queue instead.
+#
+# cancel-in-progress is false deliberately: every run produces a real image
+# and a real tag bump, so cancelling one is losing a build, not skipping
+# redundant work.
+concurrency:
+  group: build-and-push
+  cancel-in-progress: false
 
 jobs:
   build-and-push:
@@ -14,6 +55,61 @@ jobs:
     steps:
       - name: Checkout steam-orchestration onto the runner
         uses: actions/checkout@v4
+
+      # Two things used to be one: `client_payload.sha` was both the dbt code
+      # to bake *and* the image tag. With more than one trigger that is
+      # unsound — two different orchestration commits can resolve the same
+      # steam-analytics sha and would then produce two different images under
+      # one tag, which makes promotion and rollback (#120) mean nothing.
+      #
+      # So they are separated here:
+      #   - the REF is always resolved to a full sha before the build, so the
+      #     image is reproducible even when dispatched with a branch name;
+      #   - the TAG names both inputs and the run, and is therefore unique to
+      #     one build: <orchestration sha>-<analytics sha>-<run id>. A human
+      #     reading a tag in an image values file can see exactly what is in
+      #     it, which is the whole point of promotion by tag.
+      - name: Resolve the steam-analytics ref and the image tag
+        id: build
+        env:
+          # Empty on a push, and empty on a workflow_dispatch with no input,
+          # so both fall through to steam-analytics' main.
+          REQUESTED_REF: ${{ github.event.client_payload.sha || inputs.steam_analytics_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          # Resolved with `git ls-remote` rather than the GitHub API on
+          # purpose: steam-analytics is public, so this needs no token at all,
+          # and GITHUB_TOKEN is scoped to *this* repository. A raw sha is
+          # taken as-is, since ls-remote only lists refs.
+          if [[ $REQUESTED_REF =~ ^[0-9a-f]{40}$ ]]; then
+            analytics_sha=$REQUESTED_REF
+          else
+            # Both patterns, and prefer the peeled one. An *annotated* tag's
+            # own ref points at the tag **object**, not the commit — and that
+            # sha is 40 hex chars, so it would sail past the guard below and
+            # then 404 in the Dockerfile's archive/<ref>.tar.gz fetch partway
+            # through the build, which is exactly what the guard exists to
+            # stop. The commit is on the peeled `^{}` ref.
+            #
+            # Asking for `"$REQUESTED_REF"` alone is not enough and this is
+            # the trap: ls-remote filters by the pattern, and `v1.0` does not
+            # match `refs/tags/v1.0^{}`, so the peeled line is simply absent
+            # and any "prefer ^{}" logic never fires. Verified against a real
+            # annotated tag. Branches, lightweight tags and raw shas have no
+            # peeled ref and fall through to the single line.
+            refs=$(git ls-remote https://github.com/Dulain-Willis/steam-analytics.git \
+              "$REQUESTED_REF^{}" "$REQUESTED_REF")
+            analytics_sha=$(awk '$2 ~ /\^\{\}$/ {print $1; exit}' <<<"$refs")
+            [[ -n $analytics_sha ]] || analytics_sha=$(awk 'NR==1{print $1}' <<<"$refs")
+          fi
+          # Fail here rather than baking a ref the Dockerfile's tarball fetch
+          # would 404 on partway through the build.
+          [[ $analytics_sha =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::'$REQUESTED_REF' did not resolve to a steam-analytics commit (got '$analytics_sha')"; exit 1; }
+          tag="${GITHUB_SHA:0:7}-${analytics_sha:0:7}-${GITHUB_RUN_ID}"
+          echo "analytics_sha=$analytics_sha" >>"$GITHUB_OUTPUT"
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          echo "Baking steam-analytics \`$analytics_sha\` (\`$REQUESTED_REF\`) as \`$tag\`" >>"$GITHUB_STEP_SUMMARY"
 
       - name: Log in to Github Container Registry (GHRC)
         uses: docker/login-action@v3
@@ -30,9 +126,9 @@ jobs:
           push: true
           tags: |
             ghcr.io/dulain-willis/steam-orchestration:latest
-            ghcr.io/dulain-willis/steam-orchestration:${{ github.event.client_payload.sha }}
+            ghcr.io/dulain-willis/steam-orchestration:${{ steps.build.outputs.tag }}
           build-args: |
-            STEAM_ANALYTICS_REF=${{ github.event.client_payload.sha }}
+            STEAM_ANALYTICS_REF=${{ steps.build.outputs.analytics_sha }}
 
       - name: Checkout steam-infra onto the runner
         uses: actions/checkout@v4
@@ -41,14 +137,15 @@ jobs:
           token: ${{ secrets.STEAM_INFRA_PUSH_TOKEN }}
           path: steam-infra
 
-      # steam-infra's Airflow values are split base + per-environment overlay +
-      # a per-environment image file, so this bumps *prod's* image file and
-      # every new build still reaches prod. Repointing the bot at another
-      # environment means changing the filename in this step and the next.
-      - name: Bump defaultAirflowTag in steam-infra
+      # Staging's image file only, never prod's (#112 story 32). Prod's is
+      # written exclusively by steam-infra's promote-to-prod workflow, which
+      # copies the tag from here into a PR — merging that PR is the approval
+      # gate, and this bot having no write path to prod's file is what makes
+      # the gate real rather than a convention.
+      - name: Bump staging's defaultAirflowTag in steam-infra
         uses: mikefarah/yq@v4
         with:
-          cmd: yq -i '.defaultAirflowTag = "${{ github.event.client_payload.sha }}"' steam-infra/k8s/airflow/values-image-prod.yaml
+          cmd: yq -i '.defaultAirflowTag = "${{ steps.build.outputs.tag }}"' steam-infra/k8s/airflow/values-image-staging.yaml
 
       - name: Commit and push the tag bump
         working-directory: steam-infra
@@ -56,6 +153,6 @@ jobs:
           git config user.name "steam-orchestration-bot"
           git config user.email "actions@github.com"
           git diff --quiet && exit 0
-          git add k8s/airflow/values-image-prod.yaml
-          git commit -m "Bump airflow image to ${{ github.event.client_payload.sha }}"
+          git add k8s/airflow/values-image-staging.yaml
+          git commit -m "Bump staging airflow image to ${{ steps.build.outputs.tag }}"
           git push origin main
