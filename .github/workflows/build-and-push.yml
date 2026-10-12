@@ -41,10 +41,14 @@ jobs:
           token: ${{ secrets.STEAM_INFRA_PUSH_TOKEN }}
           path: steam-infra
 
+      # steam-infra's Airflow values are split base + per-environment overlay +
+      # a per-environment image file, so this bumps *prod's* image file and
+      # every new build still reaches prod. Repointing the bot at another
+      # environment means changing the filename in this step and the next.
       - name: Bump defaultAirflowTag in steam-infra
         uses: mikefarah/yq@v4
         with:
-          cmd: yq -i '.defaultAirflowTag = "${{ github.event.client_payload.sha }}"' steam-infra/k8s/airflow/values-image.yaml
+          cmd: yq -i '.defaultAirflowTag = "${{ github.event.client_payload.sha }}"' steam-infra/k8s/airflow/values-image-prod.yaml
 
       - name: Commit and push the tag bump
         working-directory: steam-infra
@@ -52,6 +56,6 @@ jobs:
           git config user.name "steam-orchestration-bot"
           git config user.email "actions@github.com"
           git diff --quiet && exit 0
-          git add k8s/airflow/values-image.yaml
+          git add k8s/airflow/values-image-prod.yaml
           git commit -m "Bump airflow image to ${{ github.event.client_payload.sha }}"
           git push origin main
