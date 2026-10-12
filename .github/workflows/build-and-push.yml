@@ -17,6 +17,11 @@ on:
     types: [dbt-project-updated]
   push:
     branches: [main]
+    # A docs-only merge would otherwise rebuild the image, bump staging's tag
+    # and have ArgoCD restart staging's Airflow for a typo.
+    paths-ignore:
+      - '**.md'
+      - LICENSE
   workflow_dispatch:
     inputs:
       steam_analytics_ref:
@@ -27,6 +32,22 @@ on:
 permissions:
   contents: read
   packages: write
+
+# Serialised, not cancelled. The last step pushes a commit to steam-infra's
+# main; two runs that overlap both check it out at the same commit, both bump
+# values-image-staging.yaml and both push, and the loser gets a
+# non-fast-forward rejection *after* its image is already in GHCR — so that
+# build silently never reaches staging and the live tag belongs to the other
+# run. Three triggers make overlapping runs routine (a merge here and a
+# steam-analytics dispatch minutes apart, or any merge during a manual
+# rebuild), so they queue instead.
+#
+# cancel-in-progress is false deliberately: every run produces a real image
+# and a real tag bump, so cancelling one is losing a build, not skipping
+# redundant work.
+concurrency:
+  group: build-and-push
+  cancel-in-progress: false
 
 jobs:
   build-and-push:
@@ -63,7 +84,23 @@ jobs:
           if [[ $REQUESTED_REF =~ ^[0-9a-f]{40}$ ]]; then
             analytics_sha=$REQUESTED_REF
           else
-            analytics_sha=$(git ls-remote https://github.com/Dulain-Willis/steam-analytics.git "$REQUESTED_REF" | awk 'NR==1{print $1}')
+            # Both patterns, and prefer the peeled one. An *annotated* tag's
+            # own ref points at the tag **object**, not the commit — and that
+            # sha is 40 hex chars, so it would sail past the guard below and
+            # then 404 in the Dockerfile's archive/<ref>.tar.gz fetch partway
+            # through the build, which is exactly what the guard exists to
+            # stop. The commit is on the peeled `^{}` ref.
+            #
+            # Asking for `"$REQUESTED_REF"` alone is not enough and this is
+            # the trap: ls-remote filters by the pattern, and `v1.0` does not
+            # match `refs/tags/v1.0^{}`, so the peeled line is simply absent
+            # and any "prefer ^{}" logic never fires. Verified against a real
+            # annotated tag. Branches, lightweight tags and raw shas have no
+            # peeled ref and fall through to the single line.
+            refs=$(git ls-remote https://github.com/Dulain-Willis/steam-analytics.git \
+              "$REQUESTED_REF^{}" "$REQUESTED_REF")
+            analytics_sha=$(awk '$2 ~ /\^\{\}$/ {print $1; exit}' <<<"$refs")
+            [[ -n $analytics_sha ]] || analytics_sha=$(awk 'NR==1{print $1}' <<<"$refs")
           fi
           # Fail here rather than baking a ref the Dockerfile's tarball fetch
           # would 404 on partway through the build.
