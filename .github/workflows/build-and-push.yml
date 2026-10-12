@@ -51,20 +51,28 @@ jobs:
       - name: Resolve the steam-analytics ref and the image tag
         id: build
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Empty on a push, and empty on a workflow_dispatch with no input.
+          # Empty on a push, and empty on a workflow_dispatch with no input,
+          # so both fall through to steam-analytics' main.
           REQUESTED_REF: ${{ github.event.client_payload.sha || inputs.steam_analytics_ref || 'main' }}
         run: |
           set -euo pipefail
-          # Resolves a branch, tag or sha alike, and fails loudly on anything
-          # that does not exist — better than baking a ref the Dockerfile's
-          # tarball fetch would 404 on halfway through the build.
-          analytics_sha=$(gh api "repos/Dulain-Willis/steam-analytics/commits/$REQUESTED_REF" --jq .sha)
+          # Resolved with `git ls-remote` rather than the GitHub API on
+          # purpose: steam-analytics is public, so this needs no token at all,
+          # and GITHUB_TOKEN is scoped to *this* repository. A raw sha is
+          # taken as-is, since ls-remote only lists refs.
+          if [[ $REQUESTED_REF =~ ^[0-9a-f]{40}$ ]]; then
+            analytics_sha=$REQUESTED_REF
+          else
+            analytics_sha=$(git ls-remote https://github.com/Dulain-Willis/steam-analytics.git "$REQUESTED_REF" | awk 'NR==1{print $1}')
+          fi
+          # Fail here rather than baking a ref the Dockerfile's tarball fetch
+          # would 404 on partway through the build.
           [[ $analytics_sha =~ ^[0-9a-f]{40}$ ]] \
-            || { echo "::error::'$REQUESTED_REF' did not resolve to a commit sha (got '$analytics_sha')"; exit 1; }
+            || { echo "::error::'$REQUESTED_REF' did not resolve to a steam-analytics commit (got '$analytics_sha')"; exit 1; }
+          tag="${GITHUB_SHA:0:7}-${analytics_sha:0:7}-${GITHUB_RUN_ID}"
           echo "analytics_sha=$analytics_sha" >>"$GITHUB_OUTPUT"
-          echo "tag=${GITHUB_SHA:0:7}-${analytics_sha:0:7}-${GITHUB_RUN_ID}" >>"$GITHUB_OUTPUT"
-          echo "Baking steam-analytics $analytics_sha ($REQUESTED_REF) as ${GITHUB_SHA:0:7}-${analytics_sha:0:7}-${GITHUB_RUN_ID}" >>"$GITHUB_STEP_SUMMARY"
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          echo "Baking steam-analytics \`$analytics_sha\` (\`$REQUESTED_REF\`) as \`$tag\`" >>"$GITHUB_STEP_SUMMARY"
 
       - name: Log in to Github Container Registry (GHRC)
         uses: docker/login-action@v3
