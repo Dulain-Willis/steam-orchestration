@@ -30,4 +30,10 @@ jobs:
         run: .venv/bin/ruff check dags/ tests/
 
       - name: Run pytest
-        run: .venv/bin/python -m pytest tests/ -v
+        # Cosmos shells out to a `dbt` executable it looks up on PATH to
+        # parse the DAG (`dbt ls`/`dbt deps`); without this the whole job
+        # fails with CosmosConfigException: Unable to find the dbt
+        # executable. `make test` already does this locally (Makefile).
+        run: |
+          export PATH="$PWD/.venv/bin:$PATH"
+          .venv/bin/python -m pytest tests/ -v
