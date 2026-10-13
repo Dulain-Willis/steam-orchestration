@@ -1,0 +1,144 @@
+# Local Airflow (the "dev" environment) — see README.md.
+#
+# Runs the *same* image as staging and prod (GHCR, built by
+# build-and-push.yml) with two bind mounts over it: this repo's dags/ and the
+# developer's own steam-analytics checkout. So DAG and dbt edits show up on
+# the next DAG parse with no image rebuild.
+#
+# Slimmed down from the official docker-compose pattern
+# (airflow.apache.org/docs/apache-airflow/3.2.2/howto/docker-compose/):
+# LocalExecutor instead of Celery drops redis, the worker and flower, and
+# SimpleAuthManager with all-admins drops user creation (and the login page).
+# Everything here is local-only and deliberately insecure.
+#
+# Driven by `make up` / `make down` — those export AIRFLOW_UID so the
+# container writes host-owned files as you rather than as uid 50000.
+
+x-airflow-common: &airflow-common
+  image: ${AIRFLOW_IMAGE_NAME:-ghcr.io/dulain-willis/steam-orchestration:latest}
+  # The image is built on amd64 runners only; be explicit so Apple Silicon
+  # emulates it instead of failing with a manifest mismatch.
+  platform: linux/amd64
+  # uid:0 — AIRFLOW_HOME and the mounts are group-root writable in the base
+  # image, so any uid works as long as the group is root.
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    # Cosmos parses the dbt project (dbt ls) at DAG-parse time, which exceeds
+    # the 30s default. The deployed Airflow uses 120; local gets more headroom
+    # because every *task* re-imports the DAG file too, and on an emulated
+    # amd64 image that parse is slow enough to blow a 120s budget.
+    AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: "300"
+    # ...and for the same reason, don't run the whole dbt graph at once: each
+    # concurrent task is another dbt process re-parsing the project. 32 (the
+    # default) starved them into import timeouts on one laptop. The deployed
+    # Airflow is similarly modest (celery worker_concurrency 2).
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "4"
+    # SimpleAuthManager is the default; all-admins drops the login page.
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    # Shared across containers so the task-execution API accepts the
+    # scheduler's tokens. Local-only, not a secret.
+    AIRFLOW__API_AUTH__JWT_SECRET: local-dev-not-a-secret
+    # Cosmos hashes the dbt project folder on every parse to decide whether to
+    # reuse its dbt ls cache. A mounted developer checkout has a .venv in it,
+    # which is thousands of irrelevant files (and broken symlinks); this is
+    # additive to Cosmos' own target/dbt_packages/logs/.git exclusions.
+    AIRFLOW__COSMOS__PROJECT_HASH_EXCLUDED_DIRS: ".venv"
+
+    # Failure email, inert. PIPELINE_ALERT_EMAIL is read with os.environ[...]
+    # at DAG import, so it must be non-empty; the smtp_default connection is
+    # only resolved if a task actually fails, and this dead URI keeps that
+    # from logging a connection-not-found on top of the real failure.
+    PIPELINE_ALERT_EMAIL: ${PIPELINE_ALERT_EMAIL:-dev@localhost}
+    AIRFLOW_CONN_SMTP_DEFAULT: smtp://localhost:1025
+
+    # The whole point of the dev environment: the same target, identity and
+    # developer schema a direct `dbt build` in steam-analytics uses, so both
+    # entrances land in the same sandbox.
+    DBT_TARGET: dev
+    SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT:?set SNOWFLAKE_ACCOUNT in .env (see .env.example)}
+    SNOWFLAKE_USER: ${SNOWFLAKE_USER:?set SNOWFLAKE_USER in .env}
+    SNOWFLAKE_ROLE: ${SNOWFLAKE_ROLE:?set SNOWFLAKE_ROLE in .env}
+    SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE:?set SNOWFLAKE_DATABASE in .env}
+    # Required and not defaulted on purpose: every schema the dev target
+    # writes is <SNOWFLAKE_SCHEMA>_<layer>, so a default would be a schema two
+    # developers share.
+    SNOWFLAKE_SCHEMA: ${SNOWFLAKE_SCHEMA:?set SNOWFLAKE_SCHEMA in .env — your developer schema prefix, e.g. dbt_yourname}
+    SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE:-COMPUTE_WH}
+    DBT_THREADS: ${DBT_THREADS:-4}
+    # The dev target authenticates with a key *file*, not key content (that is
+    # prod's shape), so the host .p8 is mounted in and this is its path
+    # inside the container.
+    SNOWFLAKE_PRIVATE_KEY_PATH: /opt/airflow/secrets/snowflake_key.p8
+    DBT_ENV_SECRET_SNOWFLAKE_KEY_PASSPHRASE: ${DBT_ENV_SECRET_SNOWFLAKE_KEY_PASSPHRASE:-}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    # Over the image's baked-in copy of the dbt project. profiles.yml,
+    # macros and models all come from the developer's checkout, so a local
+    # edit needs no rebuild. Requires `dbt deps` to have been run there.
+    - ${STEAM_ANALYTICS_DIR:?set STEAM_ANALYTICS_DIR in .env — the path to your steam-analytics checkout}:/opt/airflow/dbt/steam_analytics
+    - ${SNOWFLAKE_PRIVATE_KEY_PATH:?set SNOWFLAKE_PRIVATE_KEY_PATH in .env — the host path to your Snowflake .p8 key}:/opt/airflow/secrets/snowflake_key.p8:ro
+    # Shared so the UI (api-server) can read logs the scheduler wrote.
+    - ./logs:/opt/airflow/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+    airflow-init:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 10
+
+  airflow-init:
+    <<: *airflow-common
+    command: db migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    restart: unless-stopped
+
+volumes:
+  postgres-db-volume:

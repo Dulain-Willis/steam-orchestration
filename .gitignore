@@ -14,5 +14,8 @@ tests/fixtures/**/dbt_packages/
 tests/fixtures/**/logs/
 tests/fixtures/**/.user.yml
 
+# airflow (local docker compose)
+logs/
+
 # env
 .env

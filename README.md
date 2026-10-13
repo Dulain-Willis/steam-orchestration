@@ -59,6 +59,57 @@ currently points at.
   `steam-analytics/profiles.yml` (`SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_DATABASE`,
   `SNOWFLAKE_PRIVATE_KEY_PATH`, ...).
 
+## Local development (the dev environment)
+
+Local Airflow in Docker, running the **same GHCR image as staging and prod**, writing to the
+**same developer schemas** your own `dbt build` in `steam-analytics` writes to. One sandbox,
+whichever way you enter it.
+
+Once per machine:
+
+```
+cp .env.example .env     # then fill it in — see the comments in it
+```
+
+`.env` holds your Snowflake account, developer user, role, database, **developer schema**, the
+host path to your `.p8` key, and the path to your `steam-analytics` checkout. It is gitignored:
+one per machine, not one per branch. Use the *same* `SNOWFLAKE_SCHEMA` as `steam-analytics`'s own
+`.env`, or the DAG will build into a different sandbox than your direct dbt runs.
+
+Also run `dbt deps` once in your `steam-analytics` checkout: the mount shadows the image's
+`dbt_packages/`, and Cosmos parses the mounted project.
+
+Then:
+
+```
+make up        # bring it up, wait for the DAG to parse, report import errors honestly
+make trigger   # kick off a steam_dbt_dag run
+make logs      # follow all containers
+make down      # stop it
+make test      # the DAG validity tests (no Docker, no Snowflake)
+```
+
+The UI is at <http://localhost:8080> with no login (`simple_auth_manager_all_admins`).
+`docker compose down -v` additionally throws away the local Airflow metadata database.
+
+What local Airflow connects to:
+
+- **Snowflake**, as *you*: `DBT_TARGET=dev`, your `STEAM_DEV_<NAME>` user, the `DEVELOPER` role,
+  and `STEAM_DEV` — a role with no access at all to `STEAM_STAGING` or `STEAM_PROD`. Models land
+  in `<SNOWFLAKE_SCHEMA>_stg`, `_int`, `_marts_*`, ... exactly as a direct `dbt build` does.
+  Sources read `STEAM_RAW`.
+- **Nothing else.** Postgres is a throwaway container for Airflow's own metadata. Failure email
+  is inert: `PIPELINE_ALERT_EMAIL` only has to be non-empty (the DAG reads it at import), and
+  `smtp_default` points at a dead local URI, so no mail leaves your machine.
+
+`make up` mounts `./dags` and your `steam-analytics` checkout over the image's baked-in copies,
+so DAG edits and dbt edits (models, macros, `profiles.yml`) take effect on the next DAG parse —
+no image rebuild. The dag-processor re-parses every ~30s; a dbt change costs an extra `dbt ls`
+(up to a minute) before the new task graph shows up.
+
+The image is built for `linux/amd64` only, so on Apple Silicon it runs emulated — correct, but
+noticeably slower than a native `dbt build`.
+
 ## Building the image locally
 
 ```
@@ -71,6 +122,8 @@ No credentials needed — `steam-analytics` is a public repo, so the archive tar
 plain unauthenticated `curl`.
 
 ## Running tests
+
+`make test` does all of this for you (it creates `.venv` on first run). By hand:
 
 ```
 uv venv --python 3.12 .venv
