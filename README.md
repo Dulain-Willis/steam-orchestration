@@ -73,6 +73,9 @@ currently points at.
 
 ## Prerequisites for this DAG to actually run
 
+These are the *deployed* environments' prerequisites; locally, `.env` plus `make up` covers all
+of it (see "Local development" below — no SMTP connection needed).
+
 - An Airflow **Connection** named `smtp_default` pointing at `smtp.gmail.com:587` with a Gmail
   App Password (steam-infra AC4 — manual, 2FA-gated, not scriptable).
 - Env vars on the Airflow deployment: `PIPELINE_ALERT_EMAIL` (required — DAG import fails fast
